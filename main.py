@@ -13,9 +13,11 @@ logging.basicConfig(
 )
 
 BOT_COMMANDS = [
-    BotCommand(command="mark",   description="Відмітити відсутніх на парі"),
-    BotCommand(command="cancel", description="Скасувати поточну дію"),
-    BotCommand(command="start",     description="Головне меню"),
+    BotCommand(command="mark",    description="Відмітити відсутніх на парі"),
+    BotCommand(command="history", description="Переглянути останні 5 пар"),
+    BotCommand(command="edit",    description="Виправити помилкову відмітку"),
+    BotCommand(command="cancel",  description="Скасувати поточну дію"),
+    BotCommand(command="start",   description="Головне меню"),
 ]
 
 

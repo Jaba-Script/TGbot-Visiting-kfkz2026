@@ -352,3 +352,53 @@ async def cmd_cancel(message: Message, state: FSMContext):
         await message.answer("❌ Дію скасовано.")
     else:
         await message.answer("Немає активної дії для скасування.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /status — перевірка підключення
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.message(Command("status"))
+async def cmd_status(message: Message):
+    if not is_allowed(message.from_user.id):
+        return
+    await message.answer("⏳ Перевіряю підключення...")
+    try:
+        info = sheets.check_connection()
+    except Exception as e:
+        await message.answer(f"❌ Не вдалося підключитись до таблиці:\n<code>{e}</code>",
+                             parse_mode="HTML")
+        return
+
+    if info["ok"]:
+        await message.answer(
+            f"✅ <b>Все працює!</b>\n\n"
+            f"📊 Листів у таблиці: {len(info['sheets'])}\n"
+            f"👥 Студентів: {info['students']}\n"
+            f"📋 Листи: {', '.join(info['sheets'][:8])}"
+            f"{'...' if len(info['sheets']) > 8 else ''}",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            f"⚠️ <b>Таблиця доступна, але є проблеми:</b>\n\n"
+            f"❌ Відсутні листи: {', '.join(info['missing'])}",
+            parse_mode="HTML"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Catch-all: протухлі кнопки після перезапуску бота
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query()
+async def stale_callback(callback: CallbackQuery, state: FSMContext):
+    """
+    Обробляє будь-який callback який не перехопили інші хендлери.
+    Зазвичай це кнопки з повідомлень до перезапуску бота.
+    """
+    await state.clear()
+    await callback.answer(
+        "⚠️ Сесія застаріла після перезапуску бота. Почни заново.",
+        show_alert=True
+    )

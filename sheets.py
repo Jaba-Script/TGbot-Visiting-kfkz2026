@@ -164,3 +164,44 @@ def check_connection() -> dict:
         "missing":  list(missing),
         "students": len([s for s in students if s.strip()]),
     }
+
+
+def delete_log_rows(row_numbers: list[int]) -> None:
+    """
+    Видаляє кілька рядків з Log за їх номерами (1-based).
+    Видаляє з кінця щоб уникнути зміщення індексів.
+    """
+    if not row_numbers:
+        return
+    ws = get_spreadsheet().worksheet("Log")
+    for row_num in sorted(row_numbers, reverse=True):
+        ws.delete_rows(row_num)
+
+
+@with_retry()
+def delete_and_relog(date: str, pair_num: str, subject: str,
+                     absent: list[str], marked_by: str) -> None:
+    """
+    Видаляє всі існуючі записи пари з Log і записує нові.
+    Використовується при переотмічанні вже відміченої пари.
+    """
+    ss  = get_spreadsheet()
+    log = ss.worksheet("Log")
+
+    # Знаходимо всі рядки цієї пари (від кінця щоб не зміщувались індекси)
+    all_rows = log.get_all_values()
+    to_delete = [
+        i + 1  # 1-based індекс рядка в таблиці (рядок 1 = заголовок)
+        for i, r in enumerate(all_rows)
+        if len(r) >= 4 and r[0] == date and r[2] == pair_num and r[3] == subject
+    ]
+    for row_num in sorted(to_delete, reverse=True):
+        log.delete_rows(row_num)
+
+    # Записуємо нові
+    if absent:
+        ts   = datetime.now().strftime("%H:%M:%S")
+        day  = DAY_NAMES[datetime.now().weekday()]
+        rows = [[date, day, pair_num, subject, s, "Відсутній", marked_by, ts]
+                for s in absent]
+        log.append_rows(rows, value_input_option="USER_ENTERED")

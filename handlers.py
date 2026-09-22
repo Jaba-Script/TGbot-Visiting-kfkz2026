@@ -7,6 +7,7 @@ from datetime import datetime
 
 import sheets
 import keyboards
+from keyboards import edit_keyboard
 from states import AttendanceFlow, EditFlow
 import config
 
@@ -90,7 +91,7 @@ async def select_pair(callback: CallbackQuery, state: FSMContext):
             ]])
             await callback.message.edit_text(
                 f"⚠️ Пара {pair_num} — <b>{subject}</b> на {today} вже відмічена!\n\n"
-                f"Хочеш відмітити заново? Нові записи додадуться до існуючих.",
+                f"Хочеш перевідмітити? Старі записи будуть видалені і замінені новими.",
                 reply_markup=kb, parse_mode="HTML"
             )
             await callback.answer()
@@ -104,6 +105,7 @@ async def select_pair(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(AttendanceFlow.select_pair, F.data.startswith("force:"))
 async def force_mark(callback: CallbackQuery, state: FSMContext):
     _, pair_num, subject = callback.data.split(":", 2)
+    await state.update_data(overwrite=True)
     await _load_students(callback, state, pair_num, subject)
 
 
@@ -153,9 +155,14 @@ async def confirm_attendance(callback: CallbackQuery, state: FSMContext):
     marked_by = callback.from_user.full_name
 
     await callback.message.edit_text("⏳ Зберігаю дані...")
+    overwrite = data.get("overwrite", False)
     try:
-        sheets.log_absences(data["date"], data["pair_num"],
-                            data["subject"], absent, marked_by)
+        if overwrite:
+            sheets.delete_and_relog(data["date"], data["pair_num"],
+                                    data["subject"], absent, marked_by)
+        else:
+            sheets.log_absences(data["date"], data["pair_num"],
+                                data["subject"], absent, marked_by)
     except Exception as e:
         logger.error(f"Помилка запису в Log: {e}")
         await callback.message.edit_text("❌ Не вдалося зберегти. Спробуй ще раз.")
@@ -219,7 +226,7 @@ async def cmd_history(message: Message):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  /edit — виправлення помилки
+#  /edit — видалення кількох записів (мультиселект)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.message(Command("edit"))
@@ -227,7 +234,7 @@ async def cmd_edit(message: Message, state: FSMContext):
     if not is_allowed(message.from_user.id):
         return
     try:
-        absences = sheets.get_recent_absences(15)
+        absences = sheets.get_recent_absences(20)
     except Exception as e:
         logger.error(f"Помилка /edit: {e}")
         await message.answer("❌ Не вдалося завантажити журнал.")
@@ -237,102 +244,67 @@ async def cmd_edit(message: Message, state: FSMContext):
         await message.answer("📋 Журнал порожній — нічого видаляти.")
         return
 
-    await state.set_state(EditFlow.select_record)
-    await state.update_data(absences=absences)
+    await state.set_state(EditFlow.select_records)
+    await state.update_data(absences=absences, selected=set())
 
-    buttons = [
-        [InlineKeyboardButton(
-            text=f"❌ {a['student']} — {a['subject']} ({a['date']})",
-            callback_data=f"del:{i}"
-        )]
-        for i, a in enumerate(absences)
-    ]
-    buttons.append([InlineKeyboardButton(text="🔙 Закрити", callback_data="edit_close")])
-
+    text = ("🗑 <b>Оберіть записи для видалення</b>" + chr(10) + "<i>Натискай — виділить запис. Підтверди коли готово.</i>")
     await message.answer(
-        "🗑 Оберіть запис для видалення\n"
-        "<i>(показано 15 найновіших)</i>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        text,
+        reply_markup=edit_keyboard(absences, set()),
         parse_mode="HTML"
     )
 
+@router.callback_query(EditFlow.select_records, F.data.startswith("etoggle:"))
+async def edit_toggle(callback: CallbackQuery, state: FSMContext):
+    idx  = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    selected = set(data.get("selected", set()))
 
-@router.callback_query(EditFlow.select_record, F.data.startswith("del:"))
-async def edit_select(callback: CallbackQuery, state: FSMContext):
-    idx      = int(callback.data.split(":")[1])
-    data     = await state.get_data()
-    absences = data["absences"]
+    selected.discard(idx) if idx in selected else selected.add(idx)
+    await state.update_data(selected=selected)
 
-    if idx >= len(absences):
-        await callback.answer("❌ Запис не знайдено.", show_alert=True)
-        return
-
-    a = absences[idx]
-    await state.update_data(selected_idx=idx)
-    await state.set_state(EditFlow.confirm_delete)
-
-    await callback.message.edit_text(
-        f"⚠️ <b>Видалити запис?</b>\n\n"
-        f"👤 {a['student']}\n"
-        f"📚 {a['subject']} | Пара {a['pair']}\n"
-        f"📅 {a['date']}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🗑 Так, видалити", callback_data="edit_confirm"),
-            InlineKeyboardButton(text="← Назад",          callback_data="edit_back"),
-        ]]),
-        parse_mode="HTML"
+    await callback.message.edit_reply_markup(
+        reply_markup=edit_keyboard(data["absences"], selected)
     )
     await callback.answer()
 
 
-@router.callback_query(EditFlow.confirm_delete, F.data == "edit_confirm")
+@router.callback_query(EditFlow.select_records, F.data == "econfirm")
 async def edit_confirm(callback: CallbackQuery, state: FSMContext):
     data     = await state.get_data()
-    a        = data["absences"][data["selected_idx"]]
+    absences = data["absences"]
+    selected = set(data.get("selected", set()))
+
+    if not selected:
+        await callback.answer("⚠️ Нічого не вибрано.", show_alert=True)
+        return
+
+    to_delete = [absences[i] for i in selected if i < len(absences)]
+    row_nums  = [a["row"] for a in to_delete]
+
+    await callback.message.edit_text("⏳ Видаляю записи...")
     try:
-        sheets.delete_log_row(a["row"])
+        sheets.delete_log_rows(row_nums)
     except Exception as e:
-        logger.error(f"Помилка видалення рядка: {e}")
-        await callback.message.edit_text("❌ Не вдалося видалити запис.")
+        logger.error(f"Помилка видалення: {e}")
+        await callback.message.edit_text("❌ Не вдалося видалити записи.")
         await state.clear()
         await callback.answer()
         return
 
+    deleted_list = "\n".join(
+        f"  • {a['student']} — {a['subject']} ({a['date']})"
+        for a in to_delete
+    )
     await callback.message.edit_text(
-        f"✅ <b>Запис видалено.</b>\n\n"
-        f"👤 {a['student']}\n"
-        f"📚 {a['subject']} | Пара {a['pair']}\n"
-        f"📅 {a['date']}",
+        f"✅ <b>Видалено {len(to_delete)} записів:</b>\n{deleted_list}",
         parse_mode="HTML"
     )
     await state.clear()
     await callback.answer()
 
 
-@router.callback_query(EditFlow.confirm_delete, F.data == "edit_back")
-async def edit_back(callback: CallbackQuery, state: FSMContext):
-    """Повернутись до списку записів."""
-    data     = await state.get_data()
-    absences = data["absences"]
-    await state.set_state(EditFlow.select_record)
-
-    buttons = [
-        [InlineKeyboardButton(
-            text=f"❌ {a['student']} — {a['subject']} ({a['date']})",
-            callback_data=f"del:{i}"
-        )]
-        for i, a in enumerate(absences)
-    ]
-    buttons.append([InlineKeyboardButton(text="🔙 Закрити", callback_data="edit_close")])
-    await callback.message.edit_text(
-        "🗑 Оберіть запис для видалення\n<i>(показано 15 найновіших)</i>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "edit_close")
+@router.callback_query(EditFlow.select_records, F.data == "eclose")
 async def edit_close(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("📋 Редагування закрито.")
